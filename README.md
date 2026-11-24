@@ -1,7 +1,7 @@
 # RealtyDesk CRM
 
 A Windows desktop CRM for real-estate sales teams who work leads over
-Telegram: a central server (Node.js + MongoDB) as the shared source of
+Telegram: a ecentral server (Node.js + MongoDB) as the shared source of
 truth, and a native desktop client (Tauri) where each agent — and the
 owner — connects their own Telegram account directly via MTProto.
 
