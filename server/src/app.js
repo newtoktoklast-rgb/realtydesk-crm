@@ -34,6 +34,7 @@ function createApp() {
   app.use(express.json({ limit: '16mb' }));
   app.use(morgan('tiny'));
 
+  app.get('/', (req, res) => res.json({ ok: true, service: 'realtydesk-server', version: '0.1.0' }));
   app.get('/health', (req, res) => res.json({ ok: true, service: 'realtydesk-server' }));
 
   app.use('/api/v1/auth', authRoutes);
