@@ -26,7 +26,8 @@ function createApp() {
       await connectDb();
       next();
     } catch (err) {
-      res.status(503).json({ error: 'Database unavailable: ' + (err.message || err) });
+      console.error('[db] Connection failed:', err && err.message ? err.message : err);
+      res.status(503).json({ error: 'Database unavailable: ' + (err && err.message ? err.message : 'unknown') });
     }
   });
   // mediaRef data URLs (photos) are stored on messages; keep the cap generous

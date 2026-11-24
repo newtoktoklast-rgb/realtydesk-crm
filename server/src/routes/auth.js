@@ -5,6 +5,7 @@ const { requireAuth } = require('../middleware/auth');
 
 const ActivationCode = require('../models/ActivationCode');
 const Agent = require('../models/Agent');
+const Owner = require('../models/Owner');
 const { deleteAgentChatsOnLogout } = require('../services/cleanupService');
 const { signAccessToken, signRefreshToken, verifyRefreshToken } = require('../services/tokenService');
 
