@@ -43,7 +43,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM0N0U0OEFEODNDRTc5RjgKUldUNGVjNkRyVWgrTkZVQkRGRkpwTnZZa2F3Zm1ucXc1QjBCTCs5UHlDVzVjQUwyeDNUajJ5U3cK",
       "endpoints": [
-        "https://github.com/Andi-gech/realtydesk-crm/releases/latest/download/latest.json"
+        "https://github.com/newtoktoklast-rgb/realtydesk-crm/releases/latest/download/latest.json"
       ]
     }
   }
