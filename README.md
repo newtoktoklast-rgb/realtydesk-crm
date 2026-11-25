@@ -51,6 +51,37 @@ before running — `src/lib/telegram.ts` needs them for the MTProto login.
 via NSIS) — a normal double-click install with a Start Menu shortcut,
 not a browser wrapper.
 
+### Updating existing installs (no manual reinstall)
+
+The desktop client ships with Tauri's in-app updater. On launch it checks
+`$VITE_API_BASE_URL/../updates/...` (served by the backend at
+`/api/v1/updates/:target/:arch/:current_version`) and, if a newer signed
+release exists, shows an "Update now" banner that downloads and installs
+the new build in place, then relaunches the app.
+
+To ship an update:
+
+1. Bump `version` in `client/package.json`, `client/src-tauri/tauri.conf.json`
+   and `client/src-tauri/Cargo.toml` (keep them in sync).
+2. Build signed updater artifacts:
+   ```
+   cd client
+   $env:TAURI_SIGNING_PRIVATE_KEY = Get-Content .tauri/updater.key -Raw
+   $env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "realtydesk-update"
+   npm run tauri:build
+   ```
+   This emits `...setup.exe` plus `...setup.exe.sig` (and `.msi.sig`).
+3. Host the installer + `.sig` somewhere reachable (GitHub Releases, S3, etc.)
+   and set on the server:
+   - `LATEST_CLIENT_VERSION` (e.g. `0.2.0`)
+   - `LATEST_CLIENT_URL` (direct download URL of the installer)
+   - `LATEST_CLIENT_SIGNATURE` (contents of the `.sig` file)
+   - `LATEST_CLIENT_NOTES` / `LATEST_CLIENT_PUB_DATE` (optional)
+4. Existing clients pick it up on their next launch. No manual reinstall.
+
+The signing private key (`.tauri/updater.key`) is gitignored — keep it safe;
+losing it means you cannot ship updates to existing installs.
+
 ## What's scaffolded vs. what's left
 
 Done:

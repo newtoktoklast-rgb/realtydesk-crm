@@ -570,6 +570,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [, setAvatarRev] = useState(0);
   const [connectedAccounts, setConnectedAccounts] = useState(0);
+  const [missingSessionAccounts, setMissingSessionAccounts] = useState<any[]>([]);
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: 'error' | 'success' } | null>(null);
   const toastTimer = useRef<number | undefined>(undefined);
@@ -779,6 +780,19 @@ export default function Inbox({ role, onAddTelegram }: Props) {
           })
         );
         if (isCancelled) return;
+
+        const missing = liveResults
+          .filter((r) => !r.cl || !r.cl.connected)
+          .map((r) => r.acc);
+        setMissingSessionAccounts(missing);
+        if (missing.length > 0) {
+          notify(
+            `Could not connect to Telegram for ${missing
+              .map((a: any) => a.displayName || a.phoneMasked || a._id)
+              .join(', ')}. The local session may be missing or expired — please re-link the account.`,
+            'error'
+          );
+        }
 
         setConnectedAccounts(liveResults.filter((r) => r.cl && r.cl.connected).length);
 
@@ -1114,6 +1128,22 @@ export default function Inbox({ role, onAddTelegram }: Props) {
         </div>
       </div>
 
+      {missingSessionAccounts.length > 0 && (
+        <div className="error-box session-warning-banner" role="alert">
+          <span>
+            Could not connect to Telegram for{' '}
+            {missingSessionAccounts
+              .map((a: any) => a.displayName || a.phoneMasked || a.telegramUserId)
+              .join(', ')}
+            . The local session may be missing or expired. Please re-link the account.
+          </span>
+          {onAddTelegram && (
+            <button className="secondary-btn small-btn" onClick={onAddTelegram}>
+              Re-link
+            </button>
+          )}
+        </div>
+      )}
       <aside className="chat-list-panel">
         <div className="chat-list-header">
           <div className="list-title-row">

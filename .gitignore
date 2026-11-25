@@ -14,6 +14,8 @@ client/src-tauri/target/
 
 # Environment & secrets (keep the examples checked in)
 .env
+# Tauri updater signing keys (keep private key out of git)
+client/.tauri/
 .env.*
 !.env.example
 **/.env

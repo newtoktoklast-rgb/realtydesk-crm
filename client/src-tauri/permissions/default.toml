@@ -1,0 +1,4 @@
+[[permission]]
+identifier = "allow-keyring"
+description = "Access OS keyring commands used for secure local storage"
+commands.allow = ["keyring_set", "keyring_get", "keyring_delete"]

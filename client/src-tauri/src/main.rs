@@ -31,6 +31,16 @@ fn keyring_delete(service: String, account: String) -> Result<(), String> {
 
 fn main() {
     tauri::Builder::default()
+        .setup(|app| {
+            // In-app updater + process (relaunch) plugins. Desktop only.
+            #[cfg(desktop)]
+            {
+                app.handle()
+                    .plugin(tauri_plugin_updater::Builder::new().build())?;
+                app.handle().plugin(tauri_plugin_process::init())?;
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![keyring_set, keyring_get, keyring_delete])
         .run(tauri::generate_context!())
         .expect("error while running RealtyDesk");

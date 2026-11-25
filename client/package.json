@@ -1,6 +1,6 @@
 {
   "name": "realtydesk-client",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "description": "RealtyDesk CRM desktop client (Tauri + React). Same binary serves Agent Mode and Owner Mode. See ../docs/BUILD_SPEC.md.",
   "scripts": {
@@ -14,6 +14,8 @@
     "@fontsource/ibm-plex-mono": "^5.3.0",
     "@fontsource/ibm-plex-sans": "^5.3.0",
     "@tauri-apps/api": "^2.12.5",
+    "@tauri-apps/plugin-process": "^2.4.0",
+    "@tauri-apps/plugin-updater": "^2.14.1",
     "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

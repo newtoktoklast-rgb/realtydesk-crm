@@ -21,7 +21,7 @@ function isTauriEnvironment(): boolean {
   return typeof window !== 'undefined' && Boolean((window as any).__TAURI_INTERNALS__);
 }
 
-async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>, timeoutMs = 2000): Promise<T | null> {
+async function safeInvoke<T>(cmd: string, args?: Record<string, unknown>, timeoutMs = 5000): Promise<T | null> {
   try {
     return await Promise.race([
       invoke<T>(cmd, args).catch((err) => {

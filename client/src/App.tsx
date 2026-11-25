@@ -7,6 +7,8 @@ import { loadAuthTokens, clearAuthTokens, deleteSession } from './lib/secureStor
 import { api, tryRefresh, registerAuthFailureHandler } from './api/client';
 import { SettingsIcon } from './components/Icons';
 import BrandMark from './components/BrandMark';
+import { check as checkForUpdate } from '@tauri-apps/plugin-updater';
+import { relaunch } from '@tauri-apps/plugin-process';
 
 type Role = 'agent' | 'owner';
 type View = 'inbox' | 'add_telegram' | 'owner_admin';
@@ -41,6 +43,8 @@ export default function App() {
   const [checkingAuth, setCheckingAuth] = useState(true);
   const [bootStage, setBootStage] = useState(0);
   const [bootStalled, setBootStalled] = useState(false);
+  const [pendingUpdate, setPendingUpdate] = useState<any>(null);
+  const [installingUpdate, setInstallingUpdate] = useState(false);
 
   // Force logout if the server rejects our session (e.g. admin deleted the account).
   useEffect(() => {
@@ -52,6 +56,21 @@ export default function App() {
       });
     });
     return () => registerAuthFailureHandler(() => {});
+  }, []);
+
+  // Check for app updates (desktop only). Non-blocking; failures are silent.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        if (typeof window === 'undefined' || !('__TAURI_INTERNALS__' in window)) return;
+        const update = await checkForUpdate();
+        if (!cancelled && update) setPendingUpdate(update);
+      } catch (err) {
+        console.warn('[App] Update check failed:', err);
+      }
+    })();
+    return () => { cancelled = true; };
   }, []);
 
   // Auto-restore session on boot with reliable token refresh
@@ -220,6 +239,37 @@ export default function App() {
 
   return (
     <div className="app-shell">
+      {pendingUpdate && (
+        <div className="update-banner" role="status">
+          <span>
+            Update <strong>{pendingUpdate.version}</strong> is available.
+          </span>
+          <button
+            className="update-btn"
+            disabled={installingUpdate}
+            onClick={async () => {
+              try {
+                setInstallingUpdate(true);
+                await pendingUpdate.downloadAndInstall();
+                await relaunch();
+              } catch (err) {
+                console.error('[App] Update install failed:', err);
+                setInstallingUpdate(false);
+              }
+            }}
+          >
+            {installingUpdate ? 'Installing…' : 'Update now'}
+          </button>
+          <button
+            className="update-dismiss"
+            disabled={installingUpdate}
+            onClick={() => setPendingUpdate(null)}
+            aria-label="Dismiss update"
+          >
+            Later
+          </button>
+        </div>
+      )}
       <header className="app-header">
         <button
           type="button"
