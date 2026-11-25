@@ -1,6 +1,6 @@
 [package]
 name = "realtydesk"
-version = "0.1.2"
+version = "0.1.4"
 description = "RealtyDesk CRM desktop client"
 edition = "2021"
 

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "RealtyDesk",
-  "version": "0.1.2",
+  "version": "0.1.4",
   "identifier": "com.realtydesk.crm",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -43,7 +43,7 @@
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDM0N0U0OEFEODNDRTc5RjgKUldUNGVjNkRyVWgrTkZVQkRGRkpwTnZZa2F3Zm1ucXc1QjBCTCs5UHlDVzVjQUwyeDNUajJ5U3cK",
       "endpoints": [
-        "https://realtydesk-crm-siv1.vercel.app/api/v1/updates/{{target}}/{{arch}}/{{current_version}}"
+        "https://github.com/Andi-gech/realtydesk-crm/releases/latest/download/latest.json"
       ]
     }
   }

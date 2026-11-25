@@ -82,6 +82,17 @@ To ship an update:
 The signing private key (`.tauri/updater.key`) is gitignored — keep it safe;
 losing it means you cannot ship updates to existing installs.
 
+### Automatic releases (GitHub Actions)
+
+Pushing a tag like `v0.1.3` triggers `.github/workflows/release.yml`, which
+builds the signed installer, creates a GitHub Release, and generates
+`latest.json` for the in-app updater. Add these repository secrets first:
+
+- `TAURI_SIGNING_PRIVATE_KEY` — contents of `client/.tauri/updater.key`
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the key password
+
+After that, tagging a version is enough to publish an update to all users.
+
 ## What's scaffolded vs. what's left
 
 Done:

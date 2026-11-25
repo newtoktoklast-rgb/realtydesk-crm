@@ -54,16 +54,20 @@ router.post('/', async (req, res) => {
     });
 
     if (existing && existing.status === 'active') {
-      // The account is already submitted somewhere in this org. An account may
-      // only be submitted once, so no agent — or anyone else — may submit it
-      // again while it is active. (Unlinking revokes the account, after which
-      // it may be submitted again.)
-      return res.status(409).json({
-        error:
-          String(existing.ownerRefId) === String(req.auth.sub)
-            ? 'This Telegram account is already linked. Accounts can only be submitted once.'
-            : 'This Telegram account is already linked to another user in your organization',
-      });
+      // An account may only be linked to ONE user at a time. If a different
+      // user in the org already owns it, reject. But the SAME owner may re-link
+      // (e.g. after losing the local MTProto session) — update the existing
+      // record in place instead of creating a duplicate or forcing an unlink
+      // (which would wipe chat history).
+      if (String(existing.ownerRefId) !== String(req.auth.sub)) {
+        return res.status(409).json({
+          error: 'This Telegram account is already linked to another user in your organization',
+        });
+      }
+
+      Object.assign(existing, updateFields);
+      const account = await existing.save();
+      return res.status(200).json({ telegramAccount: account });
     }
 
     let account;
