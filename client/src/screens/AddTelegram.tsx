@@ -6,6 +6,7 @@ import {
   startTelegramQrLogin,
   isTelegramConfigured,
   normalizePhoneNumber,
+  adoptTelegramClient,
   LogEntry,
 } from '../lib/telegram';
 import { TelegramClient } from 'telegram';
@@ -258,6 +259,13 @@ export default function AddTelegram({ onLinked, onCancel }: Props) {
     if (sessionString) {
       // Session stays local only, keyed by the server-side correlation id.
       await saveSession(serverAccountId, sessionString);
+
+      // Reuse the live, already-authenticated client for the inbox. Opening a
+      // second connection with the same auth key would make Telegram push
+      // updates to only one socket — often the one without event handlers.
+      if (clientRef.current) {
+        adoptTelegramClient(serverAccountId, clientRef.current);
+      }
 
       // Background dialog sync without blocking the UI transition
       if (clientRef.current) {

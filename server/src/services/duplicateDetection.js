@@ -79,7 +79,9 @@ async function upsertContactAndDetectDuplicate({
     contact.displayName = displayName;
     changed = true;
   }
-  if (savedName && contact.savedName !== savedName) {
+  // Auto-save presets only apply to brand-new contacts. Never overwrite a
+  // saved name that already exists (whether set by Telegram or by an agent).
+  if (savedName && !contact.savedName && contact.savedName !== savedName) {
     contact.savedName = savedName;
     changed = true;
   }

@@ -117,7 +117,7 @@ export default function OwnerAdmin() {
           </button>
           <button className={tab === 'duplicates' ? 'active' : ''} onClick={() => setTab('duplicates')}>
             Duplicate leads
-            <span className="tab-count">{duplicateChats.length}</span>
+            <span className="tab-count">{new Set(duplicateChats.map((c) => c.contactId?.telegramUserId || c.contactId?._id || c._id)).size}</span>
           </button>
           <button className={tab === 'codes' ? 'active' : ''} onClick={() => setTab('codes')}>
             Activation codes

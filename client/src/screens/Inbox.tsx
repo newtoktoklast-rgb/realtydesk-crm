@@ -3,17 +3,21 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { Avatar } from '../components/Avatar';
 import BrandMark from '../components/BrandMark';
-import { getCachedAvatar, subscribeAvatarUpdates } from '../lib/avatarCache';
+import { getCachedAvatar, subscribeAvatarUpdates, bufferToDataUrl } from '../lib/avatarCache';
 import { deleteSession } from '../lib/secureStorage';
+import { destroyTelegramClient } from '../lib/telegram';
 import {
   getLiveClient,
   fetchLiveTelegramChats,
   fetchLiveTelegramMessages,
   sendLiveTelegramMessage,
   subscribeLiveTelegramUpdates,
+  chatMatchesPeer,
+  buildLiveChatFromPeer,
   mirrorLiveChatToCRM,
   LiveChat,
   LiveMessage,
+  LiveStatus,
 } from '../lib/telegramLiveService';
 import { TelegramClient } from 'telegram';
 import {
@@ -253,6 +257,14 @@ function mergeLiveAndDbChats(liveChats: any[], dbChats: any[]): any[] {
         contactId: {
           ...liveChat.contactId,
           _id: match.contactId?._id || liveChat.contactId?._id,
+          // Prefer the DB-stored saved name (incl. auto-save preset) when present,
+          // since live chats only know the Telegram address-book name.
+          savedName: match.contactId?.savedName || liveChat.contactId?.savedName,
+          firstName: match.contactId?.firstName || liveChat.contactId?.firstName,
+          lastName: match.contactId?.lastName || liveChat.contactId?.lastName,
+          displayName: match.contactId?.displayName || liveChat.contactId?.displayName,
+          username: match.contactId?.username || liveChat.contactId?.username,
+          phoneNumber: match.contactId?.phoneNumber || liveChat.contactId?.phoneNumber,
           duplicateFlag: match.contactId?.duplicateFlag ?? liveChat.contactId?.duplicateFlag,
           linkedAgents: match.contactId?.linkedAgents || (liveChat.contactId as any)?.linkedAgents,
           linkedAccounts: match.contactId?.linkedAccounts || (liveChat.contactId as any)?.linkedAccounts,
@@ -570,6 +582,20 @@ export default function Inbox({ role, onAddTelegram }: Props) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [, setAvatarRev] = useState(0);
   const [connectedAccounts, setConnectedAccounts] = useState(0);
+  // Aggregate live-socket health across all linked accounts.
+  const [liveStatus, setLiveStatus] = useState<LiveStatus>('connecting');
+  // Guards against fetching the same brand-new chat several times in a burst.
+  const unknownChatFetches = useRef<Set<string>>(new Set());
+  // Latest chat list for use inside live-update handlers (which are bound once).
+  const chatsRef = useRef<any[]>([]);
+  // Currently open conversation, so live messages there never show as unread.
+  const selectedChatIdRef = useRef<string | null>(null);
+  // Chats inserted from a live message before Telegram's dialog list catches up.
+  // Kept briefly so a background refresh cannot make them disappear.
+  const pendingNewChats = useRef<Map<string, { chat: any; at: number }>>(new Map());
+  // Agent setting: auto-save new contacts with a preset name.
+  const [autoSaveContacts, setAutoSaveContacts] = useState(false);
+  const [contactPreset, setContactPreset] = useState('');
   const [missingSessionAccounts, setMissingSessionAccounts] = useState<any[]>([]);
   const [syncProgress, setSyncProgress] = useState<{ done: number; total: number } | null>(null);
   const [toast, setToast] = useState<{ message: string; kind: 'error' | 'success' } | null>(null);
@@ -583,10 +609,20 @@ export default function Inbox({ role, onAddTelegram }: Props) {
 
   useEffect(() => () => window.clearTimeout(toastTimer.current), []);
 
+  // Keep the live-update handler's view of the chat list current.
+  useEffect(() => {
+    chatsRef.current = chats;
+  }, [chats]);
+
+  useEffect(() => {
+    selectedChatIdRef.current = selectedChatId;
+  }, [selectedChatId]);
+
   // Server-authoritative repeated-client detection
   // These come from /chats/repeated-ids which checks DB-stored chats across accounts in the org.
   const [serverRepeatedIds, setServerRepeatedIds] = useState<Set<string>>(new Set());
   const [serverCollisionMap, setServerCollisionMap] = useState<Map<string, string>>(new Map());
+  const [serverRepeatedCount, setServerRepeatedCount] = useState<number>(0);
   // Monotonic counter so a stale repeated-ids response can't overwrite newer data.
   const repeatedFetchSeq = useRef(0);
 
@@ -602,6 +638,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
       if (seq !== repeatedFetchSeq.current) return; // stale response; a newer fetch is in flight or done
       setServerRepeatedIds(new Set(res.repeatedChatIds));
       setServerCollisionMap(new Map(Object.entries(res.collisionMap)));
+      setServerRepeatedCount(typeof res.repeatedCount === 'number' ? res.repeatedCount : 0);
     } catch (err) {
       if (seq !== repeatedFetchSeq.current) return;
       console.warn('[Inbox] Could not load repeated-ids from server:', err);
@@ -624,6 +661,14 @@ export default function Inbox({ role, onAddTelegram }: Props) {
     return subscribeAvatarUpdates(() => {
       setAvatarRev((r) => r + 1);
     });
+  }, []);
+
+  // Load agent auto-save contact settings from local storage.
+  useEffect(() => {
+    try {
+      setAutoSaveContacts(localStorage.getItem('rd_auto_save_contacts') === '1');
+      setContactPreset(localStorage.getItem('rd_contact_preset') || '');
+    } catch {}
   }, []);
 
   // Fetch the signed-in user's own accounts plus the org-wide account directory.
@@ -652,6 +697,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
       // Drop the local MTProto session too — the account is revoked, so its
       // keychain entry should not linger (the session is only usable on this
       // device anyway).
+      await destroyTelegramClient(id);
       await deleteSession(id);
       await api.unlinkTelegramAccount(id);
       await fetchAccounts();
@@ -677,6 +723,22 @@ export default function Inbox({ role, onAddTelegram }: Props) {
       notify(err.message || 'Failed to update archive status');
     }
   };
+
+  // Preserves chats that arrived live but are not yet in Telegram's dialog list.
+  const mergePendingNewChats = useCallback((list: any[]) => {
+    const merged = [...list];
+    const now = Date.now();
+    for (const [key, entry] of pendingNewChats.current) {
+      if (merged.some((c) => getChatKey(c) === key)) {
+        pendingNewChats.current.delete(key);
+      } else if (now - entry.at > 10 * 60 * 1000) {
+        pendingNewChats.current.delete(key);
+      } else {
+        merged.unshift(entry.chat);
+      }
+    }
+    return merged;
+  }, []);
 
   // Refreshes the chat list. Each account is resolved to its own local MTProto
   // client, so chats always come from the account that actually owns them.
@@ -713,9 +775,11 @@ export default function Inbox({ role, onAddTelegram }: Props) {
       ]);
 
       setConnectedAccounts(liveResults.filter((r) => r.connected).length);
-      const finalChats = mergeLiveAndDbChats(
-        liveResults.flatMap((r) => r.chats),
-        dbRes.chats || []
+      const finalChats = mergePendingNewChats(
+        mergeLiveAndDbChats(
+          liveResults.flatMap((r) => r.chats),
+          dbRes.chats || []
+        )
       );
       setChats(finalChats);
       setSelectedChatId((curr) => {
@@ -730,7 +794,24 @@ export default function Inbox({ role, onAddTelegram }: Props) {
     } finally {
       if (showLoading) setLoadingChats(false);
     }
-  }, [telegramAccounts, scope, debouncedQuery, fetchRepeatedIds]);
+  }, [telegramAccounts, scope, debouncedQuery, fetchRepeatedIds, mergePendingNewChats]);
+
+  // When the window regains focus or the network comes back, reconcile with
+  // Telegram. OS sleep can leave a socket "connected" while updates stopped,
+  // so this closes the gap without waiting for the next message.
+  useEffect(() => {
+    const refresh = () => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      loadChats(false);
+      fetchRepeatedIds();
+    };
+    window.addEventListener('online', refresh);
+    document.addEventListener('visibilitychange', refresh);
+    return () => {
+      window.removeEventListener('online', refresh);
+      document.removeEventListener('visibilitychange', refresh);
+    };
+  }, [loadChats, fetchRepeatedIds]);
 
   // Initial mount: load accounts, connect every account's local client, bulk-sync
   // dialog metadata to the DB, and subscribe to live updates per account.
@@ -760,6 +841,11 @@ export default function Inbox({ role, onAddTelegram }: Props) {
     (async () => {
       const accounts = await fetchAccounts();
       if (isCancelled) return;
+      if (accounts.length === 0) {
+        setLiveStatus('offline');
+        setLoadingChats(false);
+        return;
+      }
 
       setLoadingChats(true);
       try {
@@ -799,32 +885,130 @@ export default function Inbox({ role, onAddTelegram }: Props) {
         // Subscribe to live updates per account. Each update is matched against
         // chats from the SAME account so identical peer ids across accounts
         // never update the wrong conversation.
-        for (const { acc, cl } of liveResults) {
-          if (!cl || !cl.connected) continue;
-          const accountId = String(acc._id);
-          const cleanup = subscribeLiveTelegramUpdates(cl, (msg, peerId) => {
-            const text = msg.message || (msg.media ? '[Photo]' : '');
-            const sentAt = new Date().toISOString();
-            const isOut = Boolean(msg.out);
+        const statuses = new Map<string, LiveStatus>();
+        const publishStatus = () => {
+          const values = [...statuses.values()];
+          setConnectedAccounts(values.filter((s) => s === 'live').length);
+          if (values.includes('live')) setLiveStatus('live');
+          else if (values.includes('connecting')) setLiveStatus('connecting');
+          else setLiveStatus('offline');
+        };
 
-            setChats((prev) => {
-              const idx = prev.findIndex((c) => {
+        for (const { acc, cl } of liveResults) {
+          const accountId = String(acc._id);
+          statuses.set(accountId, cl && cl.connected ? 'live' : 'connecting');
+          publishStatus();
+
+          const cleanup = subscribeLiveTelegramUpdates(
+            cl,
+            (msg, _peerId, peerIds) => {
+              const text = msg.message || (msg.media ? '[Photo]' : '');
+              const sentAt = msg.date
+                ? new Date(msg.date * 1000).toISOString()
+                : new Date().toISOString();
+              const isOut = Boolean(msg.out);
+              const liveMsg: LiveMessage = {
+                _id: String(msg.id),
+                telegramMessageId: String(msg.id),
+                direction: isOut ? 'out' : 'in',
+                senderType: isOut ? 'agent' : 'contact',
+                senderId: msg.senderId ? String(msg.senderId) : undefined,
+                text: msg.message || '',
+                sentAt,
+                rawMedia: msg.media,
+              };
+
+              const target = chatsRef.current.find((c) => {
                 const cAcc = getChatAccountId(c);
                 if (cAcc && cAcc !== accountId) return false;
-                return c.externalChatId === peerId || c._id === peerId;
+                return chatMatchesPeer(c, peerIds);
               });
-              if (idx < 0) return prev;
-              const target = prev[idx];
-              const updated = {
-                ...target,
-                lastMessagePreview: text,
-                lastMessageAt: sentAt,
-                unreadCount: isOut ? 0 : (target.unreadCount || 0) + 1,
-              };
-              const rest = prev.filter((_, i) => i !== idx);
-              return [updated, ...rest];
-            });
-          });
+
+              if (target) {
+                // Keep the list live and persist the message so the server
+                // (and the owner's poll-based view) stays in sync.
+                const isOpen =
+                  selectedChatIdRef.current === target._id ||
+                  selectedChatIdRef.current === target.externalChatId;
+                mirrorLiveChatToCRM(accountId, target, [liveMsg]).catch(() => {});
+                if (isOpen && !isOut && target._id) {
+                  api.markChatRead(target._id).catch(() => {});
+                }
+                setChats((prev) => {
+                  const idx = prev.findIndex((c) => {
+                    const cAcc = getChatAccountId(c);
+                    if (cAcc && cAcc !== accountId) return false;
+                    return chatMatchesPeer(c, peerIds);
+                  });
+                  if (idx < 0) return prev;
+                  const current = prev[idx];
+                  const updated = {
+                    ...current,
+                    lastMessagePreview: text,
+                    lastMessageAt: sentAt,
+                    unreadCount: isOut || isOpen ? 0 : (current.unreadCount || 0) + 1,
+                  };
+                  const rest = prev.filter((_, i) => i !== idx);
+                  return [updated, ...rest];
+                });
+                return;
+              }
+
+              // Brand-new conversation: insert it immediately instead of
+              // waiting for a full dialog refresh, then reconcile in background.
+              const fetchKey = `${accountId}:${peerIds.join('|')}`;
+              if (unknownChatFetches.current.has(fetchKey)) return;
+              unknownChatFetches.current.add(fetchKey);
+              (async () => {
+                try {
+                  const peer = msg.peerId || msg.chatId || msg.senderId;
+                  const liveClient = cl && cl.connected ? cl : await getLiveClient(accountId);
+                  const newChat = liveClient
+                    ? await buildLiveChatFromPeer(liveClient, accountId, peer, msg)
+                    : null;
+                  if (newChat) {
+                    pendingNewChats.current.set(`${accountId}_${newChat.externalChatId}`, {
+                      chat: newChat,
+                      at: Date.now(),
+                    });
+                    setChats((prev) => {
+                      const exists = prev.some(
+                        (c) =>
+                          getChatAccountId(c) === accountId &&
+                          chatMatchesPeer(c, [newChat.externalChatId])
+                      );
+                      if (exists) return prev;
+                      return [newChat, ...prev];
+                    });
+                    mirrorLiveChatToCRM(accountId, newChat, [liveMsg]).catch(() => {});
+                    fetchRepeatedIds();
+                  }
+                } catch (err) {
+                  console.warn('[Inbox] Could not load new chat:', err);
+                } finally {
+                  // Always reconcile with the dialog list for authoritative ids.
+                  loadChats(false);
+                  setTimeout(() => unknownChatFetches.current.delete(fetchKey), 15_000);
+                }
+              })();
+            },
+            {
+              accountId,
+              onStatus: (status) => {
+                statuses.set(accountId, status);
+                publishStatus();
+                if (status === 'live') {
+                  setMissingSessionAccounts((prev) =>
+                    prev.filter((a: any) => String(a._id) !== accountId)
+                  );
+                }
+              },
+              onReconnect: () => {
+                // Catch up on anything missed while the socket was down.
+                loadChats(false);
+              },
+            }
+          );
           cleanups.push(cleanup);
         }
 
@@ -859,7 +1043,17 @@ export default function Inbox({ role, onAddTelegram }: Props) {
                   phoneNumber: d.contactId?.phoneNumber,
                   avatarUrl: d.contactId?.avatarUrl,
                   displayName: d.contactId?.displayName,
-                  savedName: d.contactId?.savedName,
+                  savedName: (() => {
+                    try {
+                      const enabled = localStorage.getItem('rd_auto_save_contacts') === '1';
+                      const preset = localStorage.getItem('rd_contact_preset') || contactPreset || '';
+                      if (enabled && !d.contactId?.savedName) {
+                        const parts = [d.contactId?.firstName, d.contactId?.lastName, preset].filter(Boolean).map(String).map((s) => s.trim()).filter(Boolean);
+                        if (parts.length) return parts.join(' ');
+                      }
+                    } catch {}
+                    return d.contactId?.savedName;
+                  })(),
                   firstName: d.contactId?.firstName,
                   lastName: d.contactId?.lastName,
                   isBlocked: d.isBlocked,
@@ -883,7 +1077,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
         })();
         // ── END BULK STARTUP SYNC ─────────────────────────────────────────────────
 
-        const finalChats = mergeLiveAndDbChats(liveChats, dbChats);
+        const finalChats = mergePendingNewChats(mergeLiveAndDbChats(liveChats, dbChats));
         setChats(finalChats);
         setSelectedChatId((curr) => {
           if (curr && finalChats.some((c) => c._id === curr || c.externalChatId === curr)) return curr;
@@ -910,6 +1104,21 @@ export default function Inbox({ role, onAddTelegram }: Props) {
   // The in-memory useMemo is removed — all duplicate detection is DB-driven from the server.
   const repeatedChatIds = serverRepeatedIds;
   const collisionMap = serverCollisionMap;
+  // Unique repeated clients (contacts spanning 2+ accounts), not chat threads/ids.
+  // Agents only see their own repeated clients (those involving their accounts),
+  // not the org-wide total; owners keep the org-wide count.
+  const ownRepeatedClientCount = new Set(
+    chats
+      .filter((c) => repeatedChatIds.has(String(c._id || '')) || repeatedChatIds.has(String(c.externalChatId || '')))
+      .map((c) => String(c.contactId?.telegramUserId || c.contactId?._id || c._id || ''))
+      .filter(Boolean)
+  ).size;
+  const repeatedClientCount =
+    role === 'agent'
+      ? ownRepeatedClientCount
+      : serverRepeatedCount > 0
+      ? serverRepeatedCount
+      : ownRepeatedClientCount;
 
   // Filter & Search — purely local; server always returns all chats (includeArchived=true)
   const filteredChats = chats.filter((c) => {
@@ -1078,6 +1287,43 @@ export default function Inbox({ role, onAddTelegram }: Props) {
                 ))}
               </div>
             )}
+            {role === 'agent' && (
+              <div className="tg-drawer-section">
+                <div className="tg-drawer-section-title">
+                  <span>Auto-save contacts</span>
+                </div>
+                <label className="tg-drawer-status-row" style={{ cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={autoSaveContacts}
+                    onChange={(e) => {
+                      const v = e.target.checked;
+                      setAutoSaveContacts(v);
+                      try { localStorage.setItem('rd_auto_save_contacts', v ? '1' : '0'); } catch {}
+                    }}
+                  />
+                  <span className="tg-drawer-status-label">
+                    {autoSaveContacts ? 'Enabled' : 'Disabled'}
+                  </span>
+                </label>
+                <input
+                  className="tg-search-input"
+                  style={{ marginTop: 8, width: '100%' }}
+                  placeholder="Preset name (e.g. Lead)"
+                  value={contactPreset}
+                  disabled={!autoSaveContacts}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setContactPreset(v);
+                    try { localStorage.setItem('rd_contact_preset', v); } catch {}
+                  }}
+                />
+                <p style={{ fontSize: 12, opacity: 0.7, marginTop: 6 }}>
+                  When enabled, new contacts are saved as “First Last {contactPreset || 'Preset'}”.
+                </p>
+              </div>
+            )}
+
             {onAddTelegram && (
               <button
                 className="secondary-btn small-btn full-width drawer-add-account"
@@ -1092,18 +1338,22 @@ export default function Inbox({ role, onAddTelegram }: Props) {
             <div className="tg-drawer-section-title">
               <span>Telegram connection</span>
             </div>
-            <div className={`tg-drawer-status-card ${connectedAccounts > 0 ? '' : 'is-offline'}`}>
+            <div className={`tg-drawer-status-card ${liveStatus === 'live' ? '' : 'is-offline'}`}>
               <div className="tg-drawer-status-row">
-                <span className={connectedAccounts > 0 ? 'live-pulse-dot' : 'offline-dot'} />
+                <span className={liveStatus === 'live' ? 'live-pulse-dot' : 'offline-dot'} />
                 <span className="tg-drawer-status-label">
-                  {connectedAccounts > 0
+                  {liveStatus === 'live'
                     ? `Live · ${connectedAccounts} account${connectedAccounts === 1 ? '' : 's'} connected`
+                    : liveStatus === 'connecting'
+                    ? 'Reconnecting…'
                     : 'Not connected'}
                 </span>
               </div>
               <p>
-                {connectedAccounts > 0
+                {liveStatus === 'live'
                   ? 'Messages update live from your linked Telegram accounts. No manual syncing needed.'
+                  : liveStatus === 'connecting'
+                  ? 'Restoring the Telegram live connection automatically…'
                   : 'Link a Telegram account to send and receive messages live. Until then you are viewing saved history.'}
               </p>
             </div>
@@ -1156,19 +1406,32 @@ export default function Inbox({ role, onAddTelegram }: Props) {
               <MenuIcon size={18} />
             </button>
             <h1 className="list-title">Inbox</h1>
+            <button
+              type="button"
+              className="icon-btn"
+              onClick={() => { loadChats(true); fetchRepeatedIds(); }}
+              title="Refresh conversations"
+              aria-label="Refresh conversations"
+            >
+              ↻
+            </button>
             <span className="list-count">
               {filteredChats.length} {filteredChats.length === 1 ? 'chat' : 'chats'}
             </span>
             <div
-              className={`live-status-pill ${connectedAccounts > 0 ? '' : 'offline'}`}
+              className={`live-status-pill ${liveStatus === 'live' ? '' : 'offline'}`}
               title={
-                connectedAccounts > 0
+                liveStatus === 'live'
                   ? 'Live Telegram connection active'
-                  : 'No Telegram account connected — showing saved history'
+                  : liveStatus === 'connecting'
+                  ? 'Reconnecting to Telegram…'
+                  : 'Telegram connection offline — retrying automatically'
               }
             >
-              <span className={connectedAccounts > 0 ? 'live-pulse-dot' : 'offline-dot'} />
-              <span>{connectedAccounts > 0 ? 'Live' : 'Offline'}</span>
+              <span className={liveStatus === 'live' ? 'live-pulse-dot' : 'offline-dot'} />
+              <span>
+                {liveStatus === 'live' ? 'Live' : liveStatus === 'connecting' ? 'Connecting' : 'Offline'}
+              </span>
             </div>
           </div>
 
@@ -1193,7 +1456,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
           </div>
 
           {/* Top Banner Counter: Shows how many clients are repeated */}
-          {repeatedChatIds.size > 0 && (
+          {repeatedClientCount > 0 && (
             <div
               className={`repeated-top-counter-bar ${filter === 'repeated' ? 'is-active-filter' : ''}`}
               onClick={() => setFilter(filter === 'repeated' ? 'all' : 'repeated')}
@@ -1203,7 +1466,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
                 <RepeatIcon size={14} className="repeated-counter-icon" />
                 <span>
                   <strong>
-                    {repeatedChatIds.size} {repeatedChatIds.size === 1 ? 'client' : 'clients'} repeated
+                    {repeatedClientCount} {repeatedClientCount === 1 ? 'client' : 'clients'} repeated
                   </strong>{' '}
                   across accounts
                 </span>
@@ -1245,8 +1508,8 @@ export default function Inbox({ role, onAddTelegram }: Props) {
                 {f === 'repeated' ? (
                   <>
                     Repeated
-                    {repeatedChatIds.size > 0 && (
-                      <span className="filter-pill-badge-count red">{repeatedChatIds.size}</span>
+                    {repeatedClientCount > 0 && (
+                      <span className="filter-pill-badge-count red">{repeatedClientCount}</span>
                     )}
                   </>
                 ) : f === 'blocked' ? (
@@ -1315,7 +1578,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
             telegramAccounts={telegramAccounts}
             serverRepeatedIds={serverRepeatedIds}
             serverCollisionMap={serverCollisionMap}
-            totalRepeatedCount={repeatedChatIds.size}
+            totalRepeatedCount={repeatedClientCount}
             role={role}
             templates={templates}
             showTemplates={showTemplates}
@@ -1357,7 +1620,7 @@ export default function Inbox({ role, onAddTelegram }: Props) {
                   <span>unread</span>
                 </div>
                 <div className="thread-empty-hint-chip">
-                  <strong>{repeatedChatIds.size}</strong>
+                  <strong>{repeatedClientCount}</strong>
                   <span>repeated clients</span>
                 </div>
               </div>
@@ -1710,18 +1973,21 @@ function ChatThread({
   useEffect(() => {
     fetchMessages(true);
 
-    // Live real-time incoming messages directly appended to this thread
+    // Live real-time incoming messages directly appended to this thread.
+    // The subscription is self-healing, so a dropped socket resumes here too.
     let cleanup: (() => void) | undefined;
-    if (chatClient && chatClient.connected) {
-      cleanup = subscribeLiveTelegramUpdates(chatClient, (msg, peerId) => {
-        if (peerId === chat.externalChatId || peerId === String(chat.entity?.id)) {
+    if (chatAccountId) {
+      cleanup = subscribeLiveTelegramUpdates(
+        chatClient,
+        (msg, _peerId, peerIds) => {
+          if (!chatMatchesPeer(chat, peerIds)) return;
           const msgId = String(msg.id);
           const liveMsg: LiveMessage = {
             _id: msgId,
             telegramMessageId: msgId,
             direction: msg.out ? 'out' : 'in',
             senderType: msg.out ? outgoingSenderType : 'contact',
-            text: msg.message || '',
+            text: msg.message || (msg.media ? '[Photo]' : ''),
             sentAt: new Date((msg.date || Date.now() / 1000) * 1000).toISOString(),
             rawMedia: msg.media,
           };
@@ -1732,14 +1998,40 @@ function ChatThread({
           });
           // Mirror to the server so the owner's poll-based view sees it too.
           mirrorLiveChatToCRM(chatAccountId, chat, [liveMsg]).catch(() => {});
+
+          // Fetch attached photos in the background so they appear instantly.
+          if (msg.media && chatClient) {
+            Promise.race([
+              chatClient.downloadMedia(msg, {}),
+              new Promise<null>((resolve) => setTimeout(() => resolve(null), 4000)),
+            ])
+              .then((buf: any) => {
+                if (!buf || !buf.length) return;
+                const dataUrl = bufferToDataUrl(buf);
+                if (!dataUrl) return;
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    String(m.telegramMessageId) === msgId ? { ...m, mediaRef: dataUrl } : m
+                  )
+                );
+              })
+              .catch(() => {});
+          }
+        },
+        {
+          accountId: chatAccountId,
+          onReconnect: () => {
+            // Pull anything that arrived while the socket was down.
+            fetchMessages();
+          },
         }
-      });
+      );
     }
 
     return () => {
       if (cleanup) cleanup();
     };
-  }, [chat._id, chat.externalChatId, chatClient, outgoingSenderType]);
+  }, [chat._id, chat.externalChatId, chatClient, outgoingSenderType, chatAccountId]);
 
   // Lazy-load older messages when the top sentinel scrolls into view.
   useEffect(() => {
@@ -1901,6 +2193,13 @@ function ChatThread({
           </div>
         </div>
         <div className="thread-header-actions">
+          <button
+            className="secondary-btn small-btn"
+            onClick={() => fetchMessages(true)}
+            title="Refresh messages"
+          >
+            Refresh
+          </button>
           <button
             className={`secondary-btn small-btn ${isBlocked ? 'unblock-action-btn' : 'block-action-btn'}`}
             onClick={async () => {

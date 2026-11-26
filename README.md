@@ -88,7 +88,7 @@ Pushing a tag like `v0.1.3` triggers `.github/workflows/release.yml`, which
 builds the signed installer, creates a GitHub Release, and generates
 `latest.json` for the in-app updater. Add these repository secrets first:
 
-- `TAURI_SIGNING_PRIVATE_KEY` — contents of `client/.tauri/updater.key`
+- `TAURI_SIGNING_PRIVATE_KEY` — the **full, unmodified contents** of `client/.tauri/updater.key` (a single base64 line; do not decode or strip the leading/trailing text)
 - `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` — the key password
 
 After that, tagging a version is enough to publish an update to all users.

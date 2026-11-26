@@ -206,7 +206,7 @@ export const api = {
    * Telegram accounts within the same org.
    */
   listRepeatedChatIds: () =>
-    request<{ repeatedChatIds: string[]; collisionMap: Record<string, string> }>('/chats/repeated-ids'),
+    request<{ repeatedChatIds: string[]; collisionMap: Record<string, string>; repeatedCount?: number }>('/chats/repeated-ids'),
 
   chatMessages: (chatId: string, before?: number, limit = 100) => {
     const qs = new URLSearchParams({ ...(before ? { before: String(before) } : {}), limit: String(limit) });

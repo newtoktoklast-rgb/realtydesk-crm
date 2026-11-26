@@ -123,9 +123,15 @@ router.get('/repeated-ids', async (req, res) => {
     if (extStr) collisionMap[extStr] = colText;
   }
 
+  // Number of distinct repeated clients (contacts spanning 2+ accounts),
+  // NOT the number of chat threads/ids. Used for the UI counters so a
+  // client appearing in N chats still counts as a single repeated client.
+  const repeatedClientCount = Array.from(keyToAccounts.values()).filter((s) => s.size >= 2).length;
+
   return res.json({
     repeatedChatIds: Array.from(repeatedChatIds),
     collisionMap,
+    repeatedCount: repeatedClientCount,
   });
 });
 

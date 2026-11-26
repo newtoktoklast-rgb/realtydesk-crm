@@ -421,10 +421,101 @@ export async function loginWithPhone(
 }
 
 const clientCache = new Map<string, TelegramClient>();
+// One in-flight connection per account. Without this, two callers (e.g. the
+// inbox and a chat thread mounting at the same time) could open two MTProto
+// sockets with the same auth key — Telegram then pushes updates to only one of
+// them, and handlers attached to the other never fire.
+const pendingConnections = new Map<string, Promise<TelegramClient | null>>();
+
+/**
+ * Registers an already-authenticated client (the one used during `+ Add
+ * Telegram`) as the app-wide client for that account. Reusing the same
+ * instance matters: its update loop is already running and Telegram keeps
+ * pushing updates to this socket instead of a second, handler-less one.
+ */
+export function adoptTelegramClient(telegramAccountId: string, client: TelegramClient): void {
+  if (!client) return;
+  const existing = clientCache.get(telegramAccountId);
+  if (existing && existing !== client) {
+    try { void existing.destroy(); } catch {}
+  }
+  clientCache.set(telegramAccountId, client);
+  startKeepAlive();
+}
+
+export function getCachedTelegramClient(telegramAccountId: string): TelegramClient | null {
+  return clientCache.get(telegramAccountId) || null;
+}
+
+export async function destroyTelegramClient(telegramAccountId: string): Promise<void> {
+  const client = clientCache.get(telegramAccountId);
+  clientCache.delete(telegramAccountId);
+  if (client) {
+    try { await client.destroy(); } catch {}
+  }
+  if (clientCache.size === 0 && keepAliveTimer) {
+    clearInterval(keepAliveTimer);
+    keepAliveTimer = undefined;
+  }
+}
+
+// GramJS/Telegram can silently stop pushing updates on an otherwise healthy but
+// idle socket (notably for groups/channels). Sending a tiny amount of real API
+// traffic periodically keeps the update stream alive. One shared timer covers
+// every cached account, regardless of how many subscriptions exist.
+let keepAliveTimer: ReturnType<typeof setInterval> | undefined;
+
+function startKeepAlive(): void {
+  if (keepAliveTimer) return;
+  keepAliveTimer = setInterval(async () => {
+    for (const client of clientCache.values()) {
+      if (!client.connected) continue;
+      try {
+        await Promise.race([
+          client.getDialogs({ limit: 1 }),
+          new Promise((resolve) => setTimeout(resolve, 8000)),
+        ]);
+      } catch {
+        // A failed keep-alive is harmless; the watchdog reconnects if needed.
+      }
+    }
+  }, 45_000);
+}
+
+/**
+ * Connects a client and makes sure Telegram actually starts pushing updates.
+ * `updates.GetState` registers this connection for update delivery — without
+ * it some sessions stay connected but never receive live events.
+ */
+async function activateClient(client: TelegramClient): Promise<boolean> {
+  try {
+    if (!client.connected) {
+      await client.connect();
+    }
+    if (!client.connected) return false;
+    // Caches the self input peer (needed by the event dispatcher) and confirms
+    // the session is still authorised.
+    await client.getMe();
+    try {
+      await client.invoke(new Api.updates.GetState());
+    } catch {}
+    return client.connected;
+  } catch (err) {
+    console.warn('[telegram] Failed to activate client:', err);
+    return false;
+  }
+}
 
 export async function getActiveTelegramClient(telegramAccountId: string): Promise<TelegramClient | null> {
   const cached = clientCache.get(telegramAccountId);
-  if (cached && cached.connected) return cached;
+  if (cached) {
+    if (cached.connected) {
+      startKeepAlive();
+      return cached;
+    }
+    // Reconnect the SAME instance so already-registered event handlers survive.
+    if (await activateClient(cached)) return cached;
+  }
   const newClient = await reconnect(telegramAccountId);
   if (newClient) clientCache.set(telegramAccountId, newClient);
   return newClient;
@@ -435,32 +526,54 @@ export async function getActiveTelegramClient(telegramAccountId: string): Promis
  * The server never holds or returns Telegram session material.
  */
 export async function reconnect(telegramAccountId: string): Promise<TelegramClient | null> {
-  const sessionString = await loadSession(telegramAccountId);
+  const inFlight = pendingConnections.get(telegramAccountId);
+  if (inFlight) return inFlight;
 
-  if (!sessionString) return null;
+  const promise = (async (): Promise<TelegramClient | null> => {
+    // Prefer the existing instance so live event handlers keep working.
+    const cached = clientCache.get(telegramAccountId);
+    if (cached) {
+      if (await activateClient(cached)) return cached;
+      clientCache.delete(telegramAccountId);
+      try { await cached.destroy(); } catch {}
+    }
 
-  if (!isTelegramConfigured() || sessionString.startsWith('demo-session-')) {
-    return null;
-  }
+    const sessionString = await loadSession(telegramAccountId);
 
-  try {
-    const client = new TelegramClient(new StringSession(sessionString), API_ID, API_HASH, {
-      connectionRetries: 3,
-      useWSS: true,
-      deviceModel: 'Desktop Windows',
-      systemVersion: 'Windows 11',
-      appVersion: '1.0.0',
-    });
-    await client.connect();
-    if (!client.connected) {
-      console.warn('[telegram] reconnect: client.connected is false for account:', telegramAccountId);
+    if (!sessionString) return null;
+
+    if (!isTelegramConfigured() || sessionString.startsWith('demo-session-')) {
       return null;
     }
-    clientCache.set(telegramAccountId, client);
-    return client;
-  } catch (err) {
-    console.warn('[telegram] reconnect failed for account:', telegramAccountId, err);
-    return null;
+
+    try {
+      const client = new TelegramClient(new StringSession(sessionString), API_ID, API_HASH, {
+        connectionRetries: 3,
+        useWSS: true,
+        deviceModel: 'Desktop Windows',
+        systemVersion: 'Windows 11',
+        appVersion: '1.0.0',
+      });
+      const ok = await activateClient(client);
+      if (!ok) {
+        console.warn('[telegram] reconnect: client.connected is false for account:', telegramAccountId);
+        try { await client.destroy(); } catch {}
+        return null;
+      }
+      clientCache.set(telegramAccountId, client);
+      startKeepAlive();
+      return client;
+    } catch (err) {
+      console.warn('[telegram] reconnect failed for account:', telegramAccountId, err);
+      return null;
+    }
+  })();
+
+  pendingConnections.set(telegramAccountId, promise);
+  try {
+    return await promise;
+  } finally {
+    pendingConnections.delete(telegramAccountId);
   }
 }
 
@@ -516,3 +629,4 @@ export function setupUpdateListener(
     client.removeEventHandler(handler, new NewMessage({}));
   };
 }
+

@@ -151,7 +151,18 @@ export async function fetchLiveTelegramChats(
         const fullName = [entity?.firstName, entity?.lastName].filter(Boolean).join(' ').trim();
         const dialogTitle = (dialog.title || dialog.name || '').trim();
         const isContactSaved = Boolean(entity?.contact);
-        const savedName = isContactSaved ? (dialogTitle || fullName || undefined) : undefined;
+        let savedName = isContactSaved ? (dialogTitle || fullName || undefined) : undefined;
+        // Auto-save preset (agent opt-in): only applies to contacts that are NOT
+        // already saved in the Telegram address book, and only to "new" contacts.
+        if (!savedName) {
+          try {
+            if (localStorage.getItem('rd_auto_save_contacts') === '1') {
+              const preset = localStorage.getItem('rd_contact_preset') || '';
+              const parts = [entity?.firstName, entity?.lastName, preset].filter(Boolean).map(String).map((s) => s.trim()).filter(Boolean);
+              if (parts.length) savedName = parts.join(' ');
+            }
+          } catch {}
+        }
         const displayName = savedName || fullName || dialogTitle || (entity?.username ? `@${entity.username.replace(/^@/, '')}` : 'Telegram Contact');
         const username = entity?.username ? entity.username.replace(/^@/, '') : undefined;
         const isBlocked = blockedUserIds.has(String(entity?.id || '')) || blockedUserIds.has(externalChatId);
@@ -342,40 +353,256 @@ export async function sendLiveTelegramMessage(
 }
 
 /**
+ * Returns every id shape a message peer can take: raw MTProto ids (positive)
+ * and the "bot API" marked ids GramJS uses for `dialog.id`
+ * (`-chatId` for groups, `-100channelId` for channels). Comparing both shapes
+ * is required — the old code only compared the raw id, so group/channel
+ * messages never matched the chat row.
+ */
+export function getMessagePeerIds(message: any): string[] {
+  const ids: string[] = [];
+  const push = (value: any) => {
+    if (value === undefined || value === null) return;
+    const s = String(value);
+    if (s && s !== '0' && !ids.includes(s)) ids.push(s);
+  };
+
+  const peer = message?.peerId;
+  if (peer) {
+    if (peer.channelId !== undefined && peer.channelId !== null) {
+      push(`-100${peer.channelId}`);
+      push(peer.channelId);
+    } else if (peer.chatId !== undefined && peer.chatId !== null) {
+      push(`-${peer.chatId}`);
+      push(peer.chatId);
+    } else if (peer.userId !== undefined && peer.userId !== null) {
+      push(peer.userId);
+    }
+  }
+
+  // Short updates and some forwarded payloads only carry chatId/senderId.
+  push(message?.chatId);
+  if (ids.length === 0) push(message?.senderId);
+  return ids;
+}
+
+/** True when a chat row matches any of the peer id shapes. */
+export function chatMatchesPeer(chat: any, peerIds: string[]): boolean {
+  if (!chat || peerIds.length === 0) return false;
+  const candidates = [
+    chat.externalChatId,
+    chat._id,
+    chat.entity?.id,
+    chat.contactId?.telegramUserId,
+  ]
+    .filter((v) => v !== undefined && v !== null && v !== '')
+    .map(String);
+  return peerIds.some((id) => candidates.includes(id));
+}
+
+export type LiveStatus = 'live' | 'connecting' | 'offline';
+
+export interface LiveSubscriptionOptions {
+  /** Needed so the subscription can reconnect on its own. */
+  accountId?: string;
+  onStatus?: (status: LiveStatus) => void;
+  /** Called after a dropped connection is restored, so callers can catch up. */
+  onReconnect?: () => void;
+  /** How often to verify the socket is still alive. */
+  watchdogMs?: number;
+}
+
+/**
  * Subscribes to live real-time Telegram updates using GramJS event handlers.
- * Instant notifications when any message arrives or is sent.
+ *
+ * The subscription is self-healing: it watches the socket, reconnects the same
+ * client instance (preserving handlers) when it drops, and re-attaches to a
+ * replacement client if one had to be created. This is what keeps the inbox
+ * live like the normal Telegram app instead of silently going stale.
  */
 export function subscribeLiveTelegramUpdates(
-  client: TelegramClient,
-  onNewMessage: (msg: any, peerId: string) => void
+  client: TelegramClient | null,
+  onNewMessage: (msg: any, peerId: string, peerIds: string[]) => void,
+  options: LiveSubscriptionOptions = {}
 ): () => void {
-  if (!client || !client.connected) return () => {};
+  let activeClient: TelegramClient | null = client;
+  let stopped = false;
+  let reconnecting = false;
+  let handlerAttached = false;
+  let wasLive = Boolean(client?.connected);
 
   const handler = (event: any) => {
     try {
-      const message = event.message;
+      const message = event?.message;
       if (!message) return;
-      const peerId = String(
-        message.peerId?.userId ||
-        message.peerId?.chatId ||
-        message.peerId?.channelId ||
-        message.chatId ||
-        message.senderId ||
-        ''
-      );
-      onNewMessage(message, peerId);
+      const peerIds = getMessagePeerIds(message);
+      onNewMessage(message, peerIds[0] || '', peerIds);
     } catch (err) {
       console.warn('[telegramLiveService] Error in live update handler:', err);
     }
   };
 
-  client.addEventHandler(handler, new NewMessage({}));
+  const attach = () => {
+    if (!activeClient || handlerAttached) return;
+    try {
+      activeClient.addEventHandler(handler, new NewMessage({}));
+      handlerAttached = true;
+    } catch (err) {
+      console.warn('[telegramLiveService] Could not attach update handler:', err);
+    }
+  };
+
+  const detach = () => {
+    if (!activeClient || !handlerAttached) return;
+    try {
+      activeClient.removeEventHandler(handler, new NewMessage({}));
+    } catch {}
+    handlerAttached = false;
+  };
+
+  const ensureLive = async () => {
+    if (stopped || reconnecting) return;
+    if (activeClient?.connected) {
+      if (!handlerAttached) attach();
+      if (!wasLive) {
+        wasLive = true;
+        options.onStatus?.('live');
+        options.onReconnect?.();
+      }
+      return;
+    }
+
+    reconnecting = true;
+    wasLive = false;
+    options.onStatus?.('connecting');
+    try {
+      const next = options.accountId
+        ? await getActiveTelegramClient(options.accountId)
+        : null;
+      if (!next || !next.connected) {
+        options.onStatus?.('offline');
+        return;
+      }
+      if (next !== activeClient) {
+        detach();
+        activeClient = next;
+      }
+      attach();
+      wasLive = true;
+      options.onStatus?.('live');
+      options.onReconnect?.();
+    } catch (err) {
+      console.warn('[telegramLiveService] Live reconnect failed:', err);
+      options.onStatus?.('offline');
+    } finally {
+      reconnecting = false;
+    }
+  };
+
+  if (client?.connected) {
+    attach();
+    options.onStatus?.('live');
+  } else {
+    options.onStatus?.('connecting');
+    void ensureLive();
+  }
+
+  const timer = setInterval(() => { void ensureLive(); }, options.watchdogMs ?? 10_000);
+  const onOnline = () => { void ensureLive(); };
+  const onVisible = () => {
+    if (typeof document !== 'undefined' && document.visibilityState === 'visible') {
+      void ensureLive();
+    }
+  };
+  try {
+    window.addEventListener('online', onOnline);
+    document.addEventListener('visibilitychange', onVisible);
+  } catch {}
 
   return () => {
+    stopped = true;
+    clearInterval(timer);
     try {
-      client.removeEventHandler(handler, new NewMessage({}));
+      window.removeEventListener('online', onOnline);
+      document.removeEventListener('visibilitychange', onVisible);
     } catch {}
+    detach();
   };
+}
+
+/**
+ * Builds a `LiveChat` for a peer that is not in the list yet (a brand-new
+ * client messaging for the first time). Fetching the entity lets the inbox
+ * show the conversation instantly instead of waiting for a full dialog reload.
+ */
+export async function buildLiveChatFromPeer(
+  client: TelegramClient,
+  telegramAccountId: string,
+  peer: any,
+  seedMessage?: any
+): Promise<LiveChat | null> {
+  try {
+    const entity: any = await client.getEntity(peer);
+    if (!entity) return null;
+
+    const externalChatId = String(await client.getPeerId(entity));
+    const fullName = [entity.firstName, entity.lastName].filter(Boolean).join(' ').trim();
+    const dialogTitle = (entity.title || '').trim();
+    const username = entity.username ? String(entity.username).replace(/^@/, '') : undefined;
+    const isContactSaved = Boolean(entity?.contact);
+    let savedName: string | undefined;
+    if (isContactSaved) savedName = dialogTitle || fullName || undefined;
+    else {
+      try {
+        if (localStorage.getItem('rd_auto_save_contacts') === '1') {
+          const preset = localStorage.getItem('rd_contact_preset') || '';
+          const parts = [entity.firstName, entity.lastName, preset].filter(Boolean).map(String).map((s) => s.trim()).filter(Boolean);
+          if (parts.length) savedName = parts.join(' ');
+        }
+      } catch {}
+    }
+    const displayName = savedName || fullName || dialogTitle || (username ? `@${username}` : 'Telegram Contact');
+
+    let avatarUrl = getCachedAvatar(externalChatId) || undefined;
+    if (entity.photo) {
+      downloadAndCacheAvatar(client, entity, externalChatId).catch(() => {});
+    }
+
+    const sentAt = seedMessage?.date
+      ? new Date(seedMessage.date * 1000).toISOString()
+      : new Date().toISOString();
+
+    return {
+      _id: externalChatId,
+      externalChatId,
+      telegramAccountId,
+      title: displayName,
+      contactName: displayName,
+      contactId: {
+        displayName,
+        savedName,
+        firstName: entity.firstName || undefined,
+        lastName: entity.lastName || undefined,
+        username,
+        phoneNumber: entity.phone
+          ? (String(entity.phone).startsWith('+') ? String(entity.phone) : `+${entity.phone}`)
+          : undefined,
+        avatarUrl,
+        telegramUserId: entity.id ? String(entity.id) : undefined,
+        isBlocked: false,
+      },
+      lastMessageAt: sentAt,
+      lastMessagePreview: seedMessage?.message || (seedMessage?.media ? '[Photo]' : ''),
+      unreadCount: seedMessage && !seedMessage.out ? 1 : 0,
+      isArchived: false,
+      isBlocked: false,
+      entity,
+      inputEntity: (entity as any).inputEntity,
+    };
+  } catch (err) {
+    console.warn('[telegramLiveService] Could not build chat from peer:', err);
+    return null;
+  }
 }
 
 /**
@@ -396,7 +623,16 @@ export async function mirrorLiveChatToCRM(
         username: chat.contactId?.username,
         phoneNumber: chat.contactId?.phoneNumber,
         displayName: chat.contactId?.displayName,
-        savedName: chat.contactId?.savedName,
+        savedName: (() => {
+         try {
+           if (localStorage.getItem('rd_auto_save_contacts') === '1' && !chat.contactId?.savedName) {
+             const preset = localStorage.getItem('rd_contact_preset') || '';
+             const parts = [chat.contactId?.firstName, chat.contactId?.lastName, preset].filter(Boolean);
+             if (parts.length) return parts.join(' ').trim();
+           }
+         } catch {}
+         return chat.contactId?.savedName;
+       })(),
         firstName: chat.contactId?.firstName,
         lastName: chat.contactId?.lastName,
         avatarUrl: chat.contactId?.avatarUrl,
