@@ -161,6 +161,20 @@ router.get('/', async (req, res) => {
     query.$or = [{ agentId: subId }, { telegramAccountId: { $in: myAccountIds } }];
   }
 
+  // Backfill isTransferred for existing DB chats/messages containing t.me/ links
+  try {
+    const tmeRegex = /(?:https?:\/\/)?t\.me\//i;
+    const msgChatIds = await Message.distinct('chatId', { orgId: orgOid, text: { $regex: tmeRegex } });
+    const backfillOr = [{ lastMessagePreview: { $regex: tmeRegex } }];
+    if (msgChatIds.length > 0) backfillOr.push({ _id: { $in: msgChatIds } });
+    await Chat.updateMany(
+      { orgId: orgOid, isArchived: { $ne: true }, isTransferred: { $ne: true }, $or: backfillOr },
+      { $set: { isTransferred: true } }
+    );
+  } catch (err) {
+    console.warn('[chats] isTransferred backfill note:', err.message);
+  }
+
   let chats = await Chat.find(query)
     .sort({ lastMessageAt: -1 })
     .limit(1000)
@@ -208,6 +222,8 @@ router.get('/', async (req, res) => {
     });
   } else if (filter === 'blocked') {
     chats = chats.filter((c) => c.isBlocked || c.contactId?.isBlocked);
+  } else if (filter === 'transferred') {
+    chats = chats.filter((c) => Boolean(c.isTransferred));
   } else if (filter === 'mine') {
     // scope=mine already filtered by query; this is a belt-and-suspenders local pass
     // (no extra local filtering needed — scope handles it)
@@ -272,6 +288,17 @@ router.patch('/:id/block', async (req, res) => {
   }
 
   return res.json({ ok: true, isBlocked: chat.isBlocked, chat });
+});
+
+router.patch('/:id/transferred', async (req, res) => {
+  const { isTransferred = true } = req.body || {};
+  const chat = await Chat.findOne(buildChatQuery(req.params.id, req.auth.orgId));
+  if (!chat) return res.status(404).json({ error: 'Not found' });
+
+  chat.isTransferred = Boolean(isTransferred);
+  await chat.save();
+
+  return res.json({ ok: true, isTransferred: chat.isTransferred, chat });
 });
 
 router.get('/:id/messages', async (req, res) => {

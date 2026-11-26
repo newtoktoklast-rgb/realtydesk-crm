@@ -8,6 +8,80 @@
    ========================================================================== */
 
 :root {
+  color-scheme: dark;
+
+  /* Surfaces — dark mode default */
+  --frame: #0f1115;
+  --frame-deep: #0b0d10;
+  --ground: #13161b;
+  --surface: #181c22;
+  --raised: #20252d;
+  --active: #272d37;
+
+  /* Lines */
+  --border: #2a303a;
+  --rule: #232831;
+  --control: #3a4250;
+
+  /* Ink */
+  --text: #f1f3f5;
+  --muted: #a1a8b3;
+  --faint: #7c8490;
+  --on-dark: #f7f8f8;
+
+  /* The one hue. Data, status, the selected row's bar, one control. */
+  --accent: #3898b0;
+  --accent-strong: #4ab0c9;
+  --accent-tint: #173038;
+  --accent-tint-strong: #234652;
+
+  --positive: #34d399;
+  --pill-positive-bg: #113326;
+  --pill-positive-ink: #6ee7b7;
+  --negative: #f87171;
+  --pill-negative-bg: #3b181b;
+  --pill-negative-ink: #fca5a5;
+  --warning: #fbbf24;
+  --pill-warning-bg: #332712;
+  --pill-warning-border: #664d1a;
+  --pill-warning-ink: #fde68a;
+  --pill-neutral-bg: #262b34;
+  --pill-neutral-ink: #d1d5db;
+
+  /* Metrics */
+  --radius-card: 8px;
+  --radius-control: 6px;
+  --radius-sheet: 16px;
+  --sheet-inset: 8px;
+  --topbar: 48px;
+  --list-width: 344px;
+  --row-height: 68px;
+  --control-height: 32px;
+  --pad: 24px;
+  --gap: 16px;
+
+  /* Type */
+  --font: 'IBM Plex Sans', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  --font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  --fs-title: 22px;
+  --fs-section: 16px;
+  --fs-kpi: 28px;
+  --fs-body: 14px;
+  --fs-small: 12px;
+
+  /* Motion */
+  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in-out: cubic-bezier(0.76, 0, 0.24, 1);
+  --t-press: 140ms;
+  --t-hover: 180ms;
+  --t-ui: 240ms;
+  --t-drawer: 320ms;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+
   /* Surfaces — separation is a tone step or a 1px line, never a shadow. */
   --frame: #f3f2ed;
   --frame-deep: #eae9e3;
@@ -44,36 +118,6 @@
   --pill-warning-border: #fde68a;
   --pill-neutral-bg: #ebedee;
   --pill-neutral-ink: #353736;
-
-  /* Metrics */
-  --radius-card: 8px;
-  --radius-control: 6px;
-  --radius-sheet: 16px;
-  --sheet-inset: 8px;
-  --topbar: 48px;
-  --list-width: 344px;
-  --row-height: 68px;
-  --control-height: 32px;
-  --pad: 24px;
-  --gap: 16px;
-
-  /* Type */
-  --font: 'IBM Plex Sans', 'Segoe UI Variable Text', 'Segoe UI', system-ui, -apple-system, sans-serif;
-  --font-mono: 'IBM Plex Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
-  --fs-title: 22px;
-  --fs-section: 16px;
-  --fs-kpi: 28px;
-  --fs-body: 14px;
-  --fs-small: 12px;
-
-  /* Motion */
-  --ease-out: cubic-bezier(0.22, 1, 0.36, 1);
-  --ease-expo: cubic-bezier(0.16, 1, 0.3, 1);
-  --ease-in-out: cubic-bezier(0.76, 0, 0.24, 1);
-  --t-press: 140ms;
-  --t-hover: 180ms;
-  --t-ui: 240ms;
-  --t-drawer: 320ms;
 }
 
 /* --------------------------------------------------------------------------
@@ -1293,7 +1337,7 @@ label > .form-hint {
 }
 
 .repeated-top-counter-bar:hover {
-  background: #fff5dc;
+  background: var(--pill-warning-border);
 }
 
 .repeated-top-counter-bar.is-active-filter {
@@ -2070,6 +2114,30 @@ label > .form-hint {
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+.bubble-translation {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border);
+  color: var(--muted);
+  font-style: italic;
+  font-size: 13px;
+}
+
+.translate-btn {
+  margin-top: 6px;
+  padding: 2px 8px;
+  font-size: 11.5px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  border-radius: 4px;
+  cursor: pointer;
+}
+.translate-btn:hover {
+  color: var(--text);
+  border-color: var(--text-muted, #9aa);
 }
 
 .bubble-footer {

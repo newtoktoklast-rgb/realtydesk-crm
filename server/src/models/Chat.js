@@ -13,6 +13,7 @@ const chatSchema = new Schema(
     unreadCount: { type: Number, default: 0 },
     isArchived: { type: Boolean, default: false, index: true },
     isBlocked: { type: Boolean, default: false, index: true },
+    isTransferred: { type: Boolean, default: false, index: true },
   },
   { timestamps: true }
 );

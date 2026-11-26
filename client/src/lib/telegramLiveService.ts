@@ -62,6 +62,32 @@ const withTimeout = <T>(promise: Promise<T>, ms = 4000): Promise<T | null> =>
     new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
   ]);
 
+/** Returns true when text contains a Telegram link (e.g. t.me/... or https://t.me/...). */
+export function containsTmeLink(text?: string | null): boolean {
+  if (!text) return false;
+  return /(?:https?:\/\/)?t\.me\//i.test(text);
+}
+
+/**
+ * Lightweight MTProto search for any message containing "t.me/" in a chat.
+ * Propagates FLOOD_WAIT errors so callers can pause rate-limited scans.
+ */
+export async function searchChatForTmeLink(
+  client: TelegramClient,
+  peer: any
+): Promise<boolean> {
+  if (!client || !client.connected || !peer) return false;
+  const resolvedPeer =
+    typeof peer === 'string' && /^-?\d+$/.test(peer.trim())
+      ? Number(peer.trim())
+      : peer;
+  const res: any = await client.getMessages(resolvedPeer, {
+    search: 't.me/',
+    limit: 1,
+  });
+  return Array.isArray(res) && res.length > 0;
+}
+
 /**
  * Connects to Telegram MTProto for the specified account and returns the active client.
  */
@@ -255,13 +281,21 @@ export async function fetchLiveTelegramMessages(
   } | number = 100,
   onMediaDownloaded?: (msgId: string, dataUrl: string) => void
 ): Promise<FetchMessagesResult> {
-  if (!client || !client.connected) return { messages: [], hasMore: false };
+  if (!client || !client.connected || !peer) return { messages: [], hasMore: false };
 
   const limit = typeof options === 'number' ? options : (options?.limit || 100);
   const offsetId = typeof options === 'object' ? options?.offsetId : undefined;
 
+  // GramJS treats numeric strings (e.g. "123456789" or "-1001234567890") as
+  // usernames unless converted to a number, which causes getMessages to fail
+  // when chat.entity isn't attached yet.
+  const resolvedPeer =
+    typeof peer === 'string' && /^-?\d+$/.test(peer.trim())
+      ? Number(peer.trim())
+      : peer;
+
   try {
-    const rawMessages: any = await client.getMessages(peer, {
+    const rawMessages: any = await client.getMessages(resolvedPeer, {
       limit,
       offsetId,
     });
@@ -535,6 +569,62 @@ export function subscribeLiveTelegramUpdates(
  * client messaging for the first time). Fetching the entity lets the inbox
  * show the conversation instantly instead of waiting for a full dialog reload.
  */
+const TELEGRAM_SAVED_CONTACTS_KEY = 'rd_telegram_saved_contacts';
+
+function getTelegramSavedContactSet(): Set<string> {
+  try {
+    const raw = localStorage.getItem(TELEGRAM_SAVED_CONTACTS_KEY);
+    if (raw) return new Set(JSON.parse(raw));
+  } catch {}
+  return new Set();
+}
+
+function markTelegramContactSaved(tgUserId: string): void {
+  try {
+    const set = getTelegramSavedContactSet();
+    set.add(tgUserId);
+    localStorage.setItem(TELEGRAM_SAVED_CONTACTS_KEY, JSON.stringify([...set]));
+  } catch {}
+}
+
+export async function saveContactToTelegram(
+  client: TelegramClient,
+  entity: any,
+  firstName: string,
+  lastName: string,
+  phone?: string
+): Promise<boolean> {
+  if (!client || !client.connected || !entity) return false;
+  if (entity?.self) return true;
+  if (entity?.contact) return true;
+  const tgId = entity?.id ? String(entity.id) : '';
+  if (tgId && getTelegramSavedContactSet().has(tgId)) return true;
+
+  try {
+    let inputUser: any;
+    if (entity?.id && entity?.accessHash) {
+      inputUser = new Api.InputUser({ userId: entity.id, accessHash: entity.accessHash });
+    } else {
+      inputUser = await client.getInputEntity(entity);
+    }
+    const resolvedPhone = (phone || entity?.phone || '').toString().replace(/^\+/, '');
+    await client.invoke(
+      new Api.contacts.AddContact({
+        id: inputUser,
+        firstName: (firstName || '').trim() || 'Contact',
+        lastName: (lastName || '').trim(),
+        phone: resolvedPhone,
+        addPhonePrivacyException: false,
+      })
+    );
+    if (tgId) markTelegramContactSaved(tgId);
+    return true;
+  } catch (err: any) {
+    console.warn('[telegramLiveService] AddContact failed:', err?.errorMessage || err?.message || err);
+    return false;
+  }
+}
+
 export async function buildLiveChatFromPeer(
   client: TelegramClient,
   telegramAccountId: string,
@@ -615,6 +705,21 @@ export async function mirrorLiveChatToCRM(
   messages: LiveMessage[] = []
 ): Promise<void> {
   try {
+    // Auto-save to Telegram address book as well (agent opt-in), hiding the
+    // agent's phone number from the contact.
+    try {
+      if (localStorage.getItem('rd_auto_save_contacts') === '1' && !chat.contactId?.savedName && chat.entity) {
+        const preset = localStorage.getItem('rd_contact_preset') || '';
+        const firstName = chat.contactId?.firstName || '';
+        const lastName = [chat.contactId?.lastName, preset].filter(Boolean).join(' ').trim();
+        if (firstName || lastName) {
+          const cl = await getLiveClient(telegramAccountId);
+          if (cl) {
+            await saveContactToTelegram(cl, chat.entity, firstName, lastName, chat.contactId?.phoneNumber);
+          }
+        }
+      }
+    } catch {}
     await api.syncMessages({
       telegramAccountId,
       chatExternalId: chat.externalChatId,

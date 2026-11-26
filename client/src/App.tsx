@@ -3,7 +3,7 @@ import Login from './screens/Login';
 import AddTelegram from './screens/AddTelegram';
 import Inbox from './screens/Inbox';
 import OwnerAdmin from './screens/OwnerAdmin';
-import { loadAuthTokens, clearAuthTokens, deleteSession } from './lib/secureStorage';
+import { loadAuthTokens, clearAuthTokens } from './lib/secureStorage';
 import { api, tryRefresh, registerAuthFailureHandler } from './api/client';
 import { SettingsIcon } from './components/Icons';
 import BrandMark from './components/BrandMark';
@@ -45,6 +45,22 @@ export default function App() {
   const [bootStalled, setBootStalled] = useState(false);
   const [pendingUpdate, setPendingUpdate] = useState<any>(null);
   const [installingUpdate, setInstallingUpdate] = useState(false);
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => {
+    try {
+      return localStorage.getItem('rd_theme') === 'light' ? 'light' : 'dark';
+    } catch {
+      return 'dark';
+    }
+  });
+
+  useEffect(() => {
+    document.documentElement.setAttribute('data-theme', theme);
+    try {
+      localStorage.setItem('rd_theme', theme);
+    } catch {}
+  }, [theme]);
+
+  const toggleTheme = () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'));
 
   // Force logout if the server rejects our session (e.g. admin deleted the account).
   useEffect(() => {
@@ -163,15 +179,8 @@ export default function App() {
   }, []);
 
   async function handleLogout() {
-    // Tell the server to drop this agent's chats/history so the admin view stays clean.
-    try { await api.logout(); } catch { /* best effort */ }
-    // Drop local MTProto sessions so the disconnected accounts are gone.
-    try {
-      const { telegramAccounts } = await api.myTelegramAccounts();
-      await Promise.all((telegramAccounts || []).map((a: any) => deleteSession(a._id)));
-    } catch {
-      // Not signed in / no accounts — nothing to clean.
-    }
+    // Keep Telegram sessions and synced chats intact across CRM sign-out;
+    // sessions are only removed when explicitly disconnected in the profile drawer.
     await clearAuthTokens();
     setRole(null);
     setHasLinkedTelegram(false);
@@ -295,6 +304,14 @@ export default function App() {
         </nav>
 
         <div className="header-actions">
+          <button
+            type="button"
+            className="logout-btn"
+            onClick={toggleTheme}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            {theme === 'dark' ? 'Light mode' : 'Dark mode'}
+          </button>
           <button className="logout-btn" onClick={handleLogout} title="Log out">
             Sign out
           </button>

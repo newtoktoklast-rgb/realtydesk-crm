@@ -137,6 +137,13 @@ router.post('/messages', async (req, res) => {
   chat.lastMessageAt = lastMessageAt;
   chat.lastMessagePreview = lastMessagePreview;
   chat.unreadCount = (chat.unreadCount || 0) + unreadIncrement;
+  if (
+    !chat.isArchived &&
+    (/(?:https?:\/\/)?t\.me\//i.test(lastMessagePreview || '') ||
+      messages.some((m) => /(?:https?:\/\/)?t\.me\//i.test(m.text || '')))
+  ) {
+    chat.isTransferred = true;
+  }
   await chat.save();
 
   account.lastSyncAt = new Date();
@@ -273,6 +280,14 @@ router.post('/batch-messages', async (req, res) => {
       chat.lastMessageAt = lastMessageAt;
       chat.lastMessagePreview = lastMessagePreview;
       chat.unreadCount = (chat.unreadCount || 0) + unreadIncrement;
+      if (
+        !chat.isArchived &&
+        (item.isTransferred ||
+          /(?:https?:\/\/)?t\.me\//i.test(lastMessagePreview || '') ||
+          messages.some((m) => /(?:https?:\/\/)?t\.me\//i.test(m.text || '')))
+      ) {
+        chat.isTransferred = true;
+      }
       await chat.save();
       chatsSynced++;
     } catch (chatErr) {

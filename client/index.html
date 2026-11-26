@@ -7,6 +7,14 @@
     <script>
       window.global = window;
       window.process = window.process || { env: {} };
+      (function () {
+        try {
+          var t = localStorage.getItem('rd_theme') || 'dark';
+          document.documentElement.setAttribute('data-theme', t === 'light' ? 'light' : 'dark');
+        } catch (e) {
+          document.documentElement.setAttribute('data-theme', 'dark');
+        }
+      })();
     </script>
   </head>
   <body>

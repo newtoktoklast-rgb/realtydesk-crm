@@ -185,9 +185,15 @@ export const api = {
       body: JSON.stringify({ isBlocked }),
     }),
 
+  markChatTransferred: (chatId: string, isTransferred = true) =>
+    request<{ ok: true; isTransferred: boolean; chat: any }>(`/chats/${chatId}/transferred`, {
+      method: 'PATCH',
+      body: JSON.stringify({ isTransferred }),
+    }),
+
   listChats: (params: {
     scope?: 'mine' | 'all';
-    filter?: 'all' | 'repeated' | 'mine' | 'unread' | 'archived' | 'blocked';
+    filter?: 'all' | 'repeated' | 'transferred' | 'mine' | 'unread' | 'archived' | 'blocked';
     q?: string;
     includeArchived?: boolean;
   }) => {
