@@ -1946,6 +1946,14 @@ function ChatThread({
   const [attachment, setAttachmentState] = useState<DraftAttachment | null>(
     () => draftStore.get(draftKey)?.attachment ?? null
   );
+  const [sendTranslateEnabled, setSendTranslateEnabled] = useState<boolean>(() => {
+    try { return localStorage.getItem('rd_send_translate') === '1'; } catch { return false; }
+  });
+  const [sendTranslateLang, setSendTranslateLang] = useState<string>(() => {
+    try { return localStorage.getItem('rd_send_translate_lang') || 'en'; } catch { return 'en'; }
+  });
+  const [translatedPreview, setTranslatedPreview] = useState<{ src: string; text: string } | null>(null);
+  const [translatingPreview, setTranslatingPreview] = useState(false);
 
   // Write-through so an unsent draft survives switching to another conversation.
   const setDraft = (text: string) => {
@@ -2280,6 +2288,9 @@ function ChatThread({
             text: msg.message || (msg.media ? '[Photo]' : ''),
             sentAt: new Date((msg.date || Date.now() / 1000) * 1000).toISOString(),
             rawMedia: msg.media,
+            replyToMsgId: msg.replyTo?.replyToMsgId ? String(msg.replyTo.replyToMsgId) : undefined,
+            replyQuoteText: msg.replyTo?.quoteText || undefined,
+            groupedId: msg.groupedId ? String(msg.groupedId) : undefined,
           };
           setMessages((prev) => {
             // The optimistic copy appended after sending arrives here too.
@@ -2371,13 +2382,46 @@ function ChatThread({
     e.target.value = '';
   }
 
+  useEffect(() => {
+    if (!sendTranslateEnabled || !draft.trim()) {
+      setTranslatedPreview(null);
+      setTranslatingPreview(false);
+      return;
+    }
+    const src = draft.trim();
+    let cancelled = false;
+    setTranslatingPreview(true);
+    const timer = setTimeout(async () => {
+      try {
+        const out = await translateText(src, sendTranslateLang);
+        if (!cancelled) {
+          setTranslatedPreview({ src, text: out || src });
+        }
+      } finally {
+        if (!cancelled) setTranslatingPreview(false);
+      }
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [draft, sendTranslateEnabled, sendTranslateLang]);
+
   async function handleSend() {
     if ((!draft.trim() && !attachment) || sending) return;
-    const textToSend = draft.trim();
+    const rawText = draft.trim();
     const mediaToSend = attachment?.dataUrl;
     setSending(true);
 
     try {
+      let textToSend = rawText;
+      if (sendTranslateEnabled && rawText) {
+        if (translatedPreview && translatedPreview.src === rawText) {
+          textToSend = translatedPreview.text;
+        } else {
+          textToSend = await translateText(rawText, sendTranslateLang);
+        }
+      }
       const peer = chat.entity || chat.inputEntity || chat.externalChatId;
 
       if (chatClient && chatClient.connected && peer && textToSend) {
@@ -2630,58 +2674,201 @@ function ChatThread({
           <MessageSkeletons />
         ) : messages.length === 0 ? (
           <div className="no-messages-placeholder">No messages in this chat yet. Start the conversation below.</div>
-        ) : (
-          messages.map((m) => (
-            <div key={m._id || m.telegramMessageId} className={`message-bubble ${m.direction}`}>
-              {m.mediaRef ? (
-                <div className="bubble-media-wrapper" onClick={() => setPreviewMedia(m.mediaRef)}>
-                  <img
-                    src={m.mediaRef}
-                    alt="Photo"
-                    className="bubble-media-img"
-                    loading="lazy"
-                    onError={(e) => {
-                      (e.target as HTMLElement).style.display = 'none';
-                    }}
-                  />
-                </div>
-              ) : (m.text === '[Media]' || m.text === '[Photo]' || m.text?.startsWith('[Photo')) ? (
-                <div className="bubble-media-placeholder">
-                  <div className="placeholder-icon-wrap">
-                    <PhotoIcon size={20} className="placeholder-icon" />
-                  </div>
-                  <span>Photo</span>
-                </div>
-              ) : null}
-              {m.text && m.text !== '[Media]' && m.text !== '[Photo]' && !m.text.startsWith('[Photo') && (
-                <p className="bubble-text">{m.text}</p>
-              )}
-              {(() => {
-                const id = String(m._id || m.telegramMessageId || '');
-                const tr = id ? translations[id] : undefined;
-                if (tr === undefined) {
-                  if (!m.text || m.text.startsWith('[')) return null;
-                  return (
-                    <button type="button" className="translate-btn" onClick={async () => {
-                      const t = await translateText(m.text, getTargetLanguage());
-                      setTranslations((prev) => ({ ...prev, [id]: t && t !== m.text ? t : '' }));
-                    }}>Translate</button>
-                  );
-                }
-                if (!tr) return null;
-                return <p className="bubble-text bubble-translation">{tr}</p>;
-              })()}
-              <div className="bubble-footer">
-                <span className="msg-time">
-                  {new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                </span>
-                {m.direction === 'out' && (
-                  <CheckCheckIcon size={14} className="msg-check" />
-                )}
+        ) : (() => {
+          const msgById = new Map<string, any>();
+          for (const m of messages) {
+            const mid = String(m.telegramMessageId || m._id || '');
+            if (mid) msgById.set(mid, m);
+          }
+
+          // Group consecutive messages sharing the same Telegram groupedId (photo albums)
+          const groupedItems: Array<
+            | { kind: 'single'; msg: any }
+            | { kind: 'album'; key: string; items: any[] }
+          > = [];
+          for (const m of messages) {
+            const gid = m.groupedId ? String(m.groupedId) : '';
+            const prev = groupedItems[groupedItems.length - 1];
+            if (
+              gid &&
+              prev &&
+              prev.kind === 'album' &&
+              prev.items[0]?.groupedId === gid &&
+              prev.items[0]?.direction === m.direction
+            ) {
+              prev.items.push(m);
+            } else if (gid) {
+              groupedItems.push({ kind: 'album', key: `album-${gid}-${m._id || m.telegramMessageId}`, items: [m] });
+            } else {
+              groupedItems.push({ kind: 'single', msg: m });
+            }
+          }
+
+          const isMediaPlaceholderText = (t?: string) =>
+            !t || t === '[Media]' || t === '[Photo]' || t.startsWith('[Photo');
+
+          const renderReplyQuote = (msg: any) => {
+            if (!msg.replyToMsgId) return null;
+            const target = msgById.get(String(msg.replyToMsgId));
+            const senderLabel = target
+              ? target.direction === 'out'
+                ? 'You'
+                : getChatDisplayName(chat)
+              : 'Replied message';
+            const snippet =
+              msg.replyQuoteText ||
+              (target
+                ? !isMediaPlaceholderText(target.text)
+                  ? target.text
+                  : target.mediaRef || target.rawMedia
+                    ? 'Photo'
+                    : 'Message'
+                : `Message #${msg.replyToMsgId}`);
+            return (
+              <div
+                className="bubble-reply-quote"
+                role="button"
+                tabIndex={0}
+                onClick={() => {
+                  const el = messagesAreaRef.current?.querySelector(
+                    `[data-msg-id="${msg.replyToMsgId}"]`
+                  ) as HTMLElement | null;
+                  if (el) {
+                    el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    el.classList.add('is-reply-highlight');
+                    setTimeout(() => el.classList.remove('is-reply-highlight'), 1400);
+                  }
+                }}
+              >
+                <span className="bubble-reply-sender">{senderLabel}</span>
+                <span className="bubble-reply-snippet">{snippet}</span>
               </div>
-            </div>
-          ))
-        )}
+            );
+          };
+
+          const renderTranslation = (msg: any) => {
+            const id = String(msg._id || msg.telegramMessageId || '');
+            const tr = id ? translations[id] : undefined;
+            if (tr === undefined) {
+              if (!msg.text || msg.text.startsWith('[')) return null;
+              return (
+                <button
+                  type="button"
+                  className="translate-btn"
+                  onClick={async () => {
+                    const t = await translateText(msg.text, getTargetLanguage());
+                    setTranslations((prev) => ({ ...prev, [id]: t && t !== msg.text ? t : '' }));
+                  }}
+                >
+                  Translate
+                </button>
+              );
+            }
+            if (!tr) return null;
+            return <p className="bubble-text bubble-translation">{tr}</p>;
+          };
+
+          return groupedItems.map((entry) => {
+            if (entry.kind === 'album') {
+              const first = entry.items[0];
+              const last = entry.items[entry.items.length - 1];
+              const captionMsg = entry.items.find((item) => !isMediaPlaceholderText(item.text));
+              const count = entry.items.length;
+              return (
+                <div
+                  key={entry.key}
+                  data-msg-id={String(first.telegramMessageId || first._id || '')}
+                  className={`message-bubble ${first.direction} is-album`}
+                >
+                  {renderReplyQuote(first)}
+                  <div className={`bubble-media-grid count-${Math.min(count, 4)}`}>
+                    {entry.items.map((item, idx) =>
+                      item.mediaRef ? (
+                        <div
+                          key={item._id || item.telegramMessageId || idx}
+                          className="bubble-media-grid-item"
+                          onClick={() => setPreviewMedia(item.mediaRef)}
+                        >
+                          <img
+                            src={item.mediaRef}
+                            alt={`Photo ${idx + 1}`}
+                            className="bubble-media-grid-img"
+                            loading="lazy"
+                            onError={(e) => {
+                              (e.target as HTMLElement).style.display = 'none';
+                            }}
+                          />
+                        </div>
+                      ) : (
+                        <div
+                          key={item._id || item.telegramMessageId || idx}
+                          className="bubble-media-placeholder compact"
+                        >
+                          <PhotoIcon size={18} className="placeholder-icon" />
+                        </div>
+                      )
+                    )}
+                  </div>
+                  {captionMsg && (
+                    <>
+                      <p className="bubble-text">{captionMsg.text}</p>
+                      {renderTranslation(captionMsg)}
+                    </>
+                  )}
+                  <div className="bubble-footer">
+                    <span className="msg-time">
+                      {new Date(last.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                    </span>
+                    {first.direction === 'out' && <CheckCheckIcon size={14} className="msg-check" />}
+                  </div>
+                </div>
+              );
+            }
+
+            const m = entry.msg;
+            return (
+              <div
+                key={m._id || m.telegramMessageId}
+                data-msg-id={String(m.telegramMessageId || m._id || '')}
+                className={`message-bubble ${m.direction}`}
+              >
+                {renderReplyQuote(m)}
+                {m.mediaRef ? (
+                  <div className="bubble-media-wrapper" onClick={() => setPreviewMedia(m.mediaRef)}>
+                    <img
+                      src={m.mediaRef}
+                      alt="Photo"
+                      className="bubble-media-img"
+                      loading="lazy"
+                      onError={(e) => {
+                        (e.target as HTMLElement).style.display = 'none';
+                      }}
+                    />
+                  </div>
+                ) : (m.text === '[Media]' || m.text === '[Photo]' || m.text?.startsWith('[Photo')) ? (
+                  <div className="bubble-media-placeholder">
+                    <div className="placeholder-icon-wrap">
+                      <PhotoIcon size={20} className="placeholder-icon" />
+                    </div>
+                    <span>Photo</span>
+                  </div>
+                ) : null}
+                {!isMediaPlaceholderText(m.text) && (
+                  <p className="bubble-text">{m.text}</p>
+                )}
+                {renderTranslation(m)}
+                <div className="bubble-footer">
+                  <span className="msg-time">
+                    {new Date(m.sentAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                  {m.direction === 'out' && (
+                    <CheckCheckIcon size={14} className="msg-check" />
+                  )}
+                </div>
+              </div>
+            );
+          });
+        })()}
         <div ref={messagesEndRef} />
       </div>
 
@@ -2741,6 +2928,63 @@ function ChatThread({
             </div>
           </div>
         )}
+
+        {sendTranslateEnabled && (draft.trim() || translatingPreview) && (
+          <div className="composer-translate-preview" role="status" aria-live="polite">
+            <span className="composer-translate-badge">
+              Send as {sendTranslateLang.toUpperCase()}
+            </span>
+            <span className="composer-translate-text">
+              {translatingPreview
+                ? 'Translating…'
+                : translatedPreview?.text || draft.trim()}
+            </span>
+          </div>
+        )}
+
+        <div className="composer-translate-bar">
+          <button
+            type="button"
+            className={`composer-translate-toggle ${sendTranslateEnabled ? 'active' : ''}`}
+            onClick={() => {
+              const next = !sendTranslateEnabled;
+              setSendTranslateEnabled(next);
+              try { localStorage.setItem('rd_send_translate', next ? '1' : '0'); } catch {}
+            }}
+            title="Automatically translate your outgoing message before sending"
+          >
+            {sendTranslateEnabled ? 'Auto-send translate: ON' : 'Auto-send translate: OFF'}
+          </button>
+          {sendTranslateEnabled && (
+            <select
+              className="composer-translate-select"
+              aria-label="Outgoing translation language"
+              value={sendTranslateLang}
+              onChange={(e) => {
+                const v = e.target.value;
+                setSendTranslateLang(v);
+                try { localStorage.setItem('rd_send_translate_lang', v); } catch {}
+              }}
+            >
+              <option value="en">English (EN)</option>
+              <option value="zh">Chinese (ZH)</option>
+              <option value="ru">Russian (RU)</option>
+              <option value="es">Spanish (ES)</option>
+              <option value="fr">French (FR)</option>
+              <option value="de">German (DE)</option>
+              <option value="ar">Arabic (AR)</option>
+              <option value="tr">Turkish (TR)</option>
+              <option value="hi">Hindi (HI)</option>
+              <option value="ja">Japanese (JA)</option>
+              <option value="ko">Korean (KO)</option>
+              <option value="pt">Portuguese (PT)</option>
+              <option value="it">Italian (IT)</option>
+              <option value="id">Indonesian (ID)</option>
+              <option value="vi">Vietnamese (VI)</option>
+              <option value="th">Thai (TH)</option>
+            </select>
+          )}
+        </div>
 
         <div className="composer-row">
           <input

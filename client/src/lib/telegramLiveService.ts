@@ -46,6 +46,9 @@ export interface LiveMessage {
   mediaRef?: string;
   sentAt: string;
   rawMedia?: any;
+  replyToMsgId?: string;
+  replyQuoteText?: string;
+  groupedId?: string;
 }
 
 export interface FetchMessagesResult {
@@ -330,6 +333,9 @@ export async function fetchLiveTelegramMessages(
         text,
         sentAt,
         rawMedia: m.media,
+        replyToMsgId: m.replyTo?.replyToMsgId ? String(m.replyTo.replyToMsgId) : undefined,
+        replyQuoteText: m.replyTo?.quoteText || undefined,
+        groupedId: m.groupedId ? String(m.groupedId) : undefined,
       };
 
       // Download photo media asynchronously

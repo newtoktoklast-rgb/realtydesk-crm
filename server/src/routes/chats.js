@@ -8,6 +8,16 @@ const { requireAuth } = require('../middleware/auth');
 const router = express.Router();
 router.use(requireAuth);
 
+function isServiceOrSpamContact(contact) {
+  if (!contact) return false;
+  const tgId = String(contact.telegramUserId || '').trim();
+  const username = String(contact.username || '').replace(/^@/, '').toLowerCase();
+  // Telegram service notifications and common system/spam bot accounts.
+  if (['777000', '42777', '333000', '424000', '4244000', '178220800'].includes(tgId)) return true;
+  if (username === 'spambot' || username === 'telegram') return true;
+  return false;
+}
+
 function buildChatQuery(id, orgId) {
   if (mongoose.Types.ObjectId.isValid(id)) {
     return {
@@ -45,8 +55,10 @@ router.get('/repeated-ids', async (req, res) => {
   // Repeats are keyed ONLY by the Telegram-unique contact id (telegramUserId).
   // Name, username, phone and chat-id keys are intentionally excluded so a
   // repeat requires the same Telegram account id in 2+ accounts.
-  const getKeys = (c) =>
-    c.contactId?.telegramUserId ? [`tg:${String(c.contactId.telegramUserId).trim()}`] : [];
+  const getKeys = (c) => {
+    if (isServiceOrSpamContact(c.contactId)) return [];
+    return c.contactId?.telegramUserId ? [`tg:${String(c.contactId.telegramUserId).trim()}`] : [];
+  };
 
   for (const c of activeChats) {
     const accId = String(c.telegramAccountId?._id || c.telegramAccountId || '');
@@ -204,6 +216,7 @@ router.get('/', async (req, res) => {
     for (const ac of activeChats) {
       const accId = String(ac.telegramAccountId || '');
       if (!accId) continue;
+      if (isServiceOrSpamContact(ac.contactId)) continue;
       const keys = [ac.contactId?.telegramUserId ? `tg:${String(ac.contactId.telegramUserId).trim()}` : null].filter(Boolean);
       for (const k of keys) {
         if (!keyToAccounts.has(k)) keyToAccounts.set(k, new Set());
@@ -213,6 +226,7 @@ router.get('/', async (req, res) => {
 
     chats = chats.filter((c) => {
       if (c.isArchived) return false;
+      if (isServiceOrSpamContact(c.contactId)) return false;
       const keys = [c.contactId?.telegramUserId ? `tg:${String(c.contactId.telegramUserId).trim()}` : null].filter(Boolean);
       for (const k of keys) {
         const accSet = keyToAccounts.get(k);
